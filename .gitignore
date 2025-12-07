@@ -1,13 +1,9 @@
-# User-specific configuration files
-proxies.json
-tasks.json
-info.json
-resrevations.json
-accounts.json
-license_key.json
-**/suspicious_commits.txt
+# Environment files (contain secrets)
+.env
+.env.*
+!.env.example
 
-# Python cache files
+# Python cache
 __pycache__/
 **/__pycache__/
 *.py[cod]
@@ -31,7 +27,11 @@ wheels/
 .installed.cfg
 *.egg
 
-# Unit test / coverage reports
+# UV
+.venv/
+uv.lock
+
+# Unit test / coverage
 htmlcov/
 .tox/
 .coverage
@@ -46,24 +46,17 @@ coverage.xml
 venv/
 env/
 ENV/
-.env
-.venv
-*-venv/
 
-# IDE specific files
+# IDE
 .idea/
 .vscode/
 *.swp
 *.swo
 .DS_Store
 
-# Log files
+# Logs
 *.log
 logs/
 
-# Local development
-.env.local
-.env.development.local
-
 # Build artifacts
-*.spec 
+*.spec
