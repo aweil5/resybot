@@ -1,5 +1,6 @@
 """Core booking logic and task execution."""
 
+import json
 import logging
 import threading
 import time
@@ -35,6 +36,29 @@ _stats = {
     "scan_count": 0,
     "availability_seen": {},  # date -> count
 }
+
+# Global backoff coordination - all threads pause together on rate limits
+_global_backoff_lock = threading.Lock()
+_global_backoff_until = 0.0  # Unix timestamp when backoff ends
+
+
+def set_global_backoff(seconds: float) -> None:
+    """Set global backoff time (thread-safe). All threads will pause."""
+    global _global_backoff_until
+    with _global_backoff_lock:
+        new_until = time.time() + seconds
+        if new_until > _global_backoff_until:
+            _global_backoff_until = new_until
+
+
+def wait_for_global_backoff() -> None:
+    """Wait if in global backoff period (thread-safe)."""
+    global _global_backoff_until
+    with _global_backoff_lock:
+        wait_time = _global_backoff_until - time.time()
+    if wait_time > 0:
+        log_status(f"Global backoff active, waiting {wait_time:.1f}s...", "warning")
+        time.sleep(wait_time)
 
 
 def increment_scan_count() -> None:
@@ -136,26 +160,39 @@ def get_details(
     party_size: int,
     config_token: str,
     restaurant_id: str,
-    headers: dict[str, str],
-    select_proxy: dict[str, str] | None,
+    session: requests.Session,
+    timeout: float = 30.0,
 ) -> str | None:
-    """Get book token from server."""
-    url = f"{settings.server_url}/api/get-details"
-    payload = {
-        "day": day,
-        "party_size": party_size,
-        "config_token": config_token,
-        "restaurant_id": restaurant_id,
-        "headers": headers,
-        "select_proxy": select_proxy,
-    }
+    """Get book token directly from Resy API.
+
+    Args:
+        day: Date in YYYY-MM-DD format
+        party_size: Number of guests
+        config_token: The config token from slot search
+        restaurant_id: Resy venue ID
+        session: Requests session with auth headers already set
+        timeout: Request timeout in seconds
+
+    Returns:
+        Book token string if successful, None otherwise
+    """
+    auth_token = session.headers.get("X-Resy-Auth-Token", "")
+    url = (
+        f"https://api.resy.com/3/details?"
+        f"day={day}&"
+        f"party_size={party_size}&"
+        f"x-resy-auth-token={auth_token}&"
+        f"venue_id={restaurant_id}&"
+        f"config_id={config_token}"
+    )
 
     try:
-        response = requests.post(url, json=payload, timeout=30)
+        response = session.get(url, timeout=timeout)
 
         if response.status_code == 429:
             retry_after = int(response.headers.get("Retry-After", 60))
             log_status(f"Rate limited getting details. Waiting {retry_after}s", "warning")
+            set_global_backoff(retry_after)
             time.sleep(retry_after)
             return None
 
@@ -164,7 +201,7 @@ def get_details(
             return None
 
         data = response.json()
-        return data.get("response_value")
+        return data.get("book_token", {}).get("value")
     except Exception as e:
         log_status(f"Get details error: {e}", "error")
         return None
@@ -173,24 +210,45 @@ def get_details(
 def book_reservation(
     book_token: str,
     payment_id: int,
-    headers: dict[str, str],
-    select_proxy: dict[str, str] | None,
+    session: requests.Session,
+    timeout: float = 30.0,
 ) -> dict[str, Any]:
-    """Book reservation through server."""
-    url = f"{settings.server_url}/api/book-reservation"
+    """Book reservation directly via Resy API.
+
+    Args:
+        book_token: The book token from get_details
+        payment_id: Payment method ID
+        session: Requests session with auth headers already set
+        timeout: Request timeout in seconds
+
+    Returns:
+        Response dict with reservation_id if successful, or error info
+    """
+    url = "https://api.resy.com/3/book"
     payload = {
         "book_token": book_token,
-        "payment_id": payment_id,
-        "headers": headers,
-        "select_proxy": select_proxy,
+        "struct_payment_method": json.dumps({"id": payment_id}),
+        "source_id": "resy.com-venue-details",
+    }
+
+    # Booking requires additional headers beyond what's in the session
+    auth_token = session.headers.get("X-Resy-Auth-Token", "")
+    booking_headers = {
+        "X-Origin": "https://widgets.resy.com",
+        "X-Resy-Universal-Auth": auth_token,
+        "Referer": "https://widgets.resy.com/",
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Cache-Control": "no-cache",
+        "Sec-Fetch-Dest": "empty",
     }
 
     try:
-        response = requests.post(url, json=payload, timeout=30)
+        response = session.post(url, data=payload, headers=booking_headers, timeout=timeout)
 
         if response.status_code == 429:
             retry_after = int(response.headers.get("Retry-After", 60))
             log_status(f"Rate limited during booking. Waiting {retry_after}s", "warning")
+            set_global_backoff(retry_after)
             time.sleep(retry_after)
             return {"error": "rate_limited"}
 
@@ -224,12 +282,9 @@ def try_book_slots(
     date: str,
     task: Task,
     session: requests.Session,
-    select_proxy: dict[str, str] | None,
     timeout: float,
 ) -> bool:
     """Try to book from a list of valid slots. Returns True if successful."""
-    headers = dict(session.headers)
-
     for time_str, config_token, slot in valid_slots:
         log_status(f"Getting book token for {time_str}...", "info")
 
@@ -238,8 +293,8 @@ def try_book_slots(
             task.party_size,
             config_token,
             task.restaurant_id,
-            headers,
-            select_proxy,
+            session,
+            timeout,
         )
 
         if not book_token:
@@ -251,8 +306,8 @@ def try_book_slots(
         result = book_reservation(
             book_token,
             task.payment_id,
-            headers,
-            select_proxy,
+            session,
+            timeout,
         )
 
         if "reservation_id" in result or (
@@ -286,8 +341,14 @@ def try_book_slots(
     return False
 
 
-def execute_task(task: Task, proxy_url: str | None) -> None:
-    """Execute a single booking task."""
+def execute_task(task: Task, proxy_url: str | None, thread_index: int = 0) -> None:
+    """Execute a single booking task.
+
+    Args:
+        task: The booking task configuration
+        proxy_url: Optional proxy URL
+        thread_index: Index of this thread (0-based), used for staggering API calls
+    """
     log_status(
         f"Starting task: Restaurant {task.restaurant_id}, Party {task.party_size}",
         "info",
@@ -372,7 +433,7 @@ def execute_task(task: Task, proxy_url: str | None) -> None:
                 if response2.status_code == 429:
                     retry_after = int(response2.headers.get("Retry-After", 5))
                     log_status(f"{mode_indicator}Rate limited. Waiting {retry_after}s...", "warning")
-                    # Removed: send_rate_limit_warning - only log to console
+                    set_global_backoff(retry_after)  # Pause all threads
                     time.sleep(retry_after)
                     continue
 
@@ -393,12 +454,14 @@ def execute_task(task: Task, proxy_url: str | None) -> None:
                             )
 
                             # Try to book immediately
-                            if try_book_slots(valid_slots, target_date, task, session, select_proxy, timeout):
+                            if try_book_slots(valid_slots, target_date, task, session, timeout):
                                 session.close()
                                 return
 
-                # Sleep burst delay and continue
-                time.sleep(task.burst_delay / 1000)
+                # Sleep burst delay with stagger offset and continue
+                wait_for_global_backoff()  # Check if rate limited globally
+                stagger = thread_index * settings.stagger_burst_ms
+                time.sleep((task.burst_delay + stagger) / 1000)
                 continue
 
             # IDLE MODE: Normal calendar scan for all dates
@@ -419,7 +482,7 @@ def execute_task(task: Task, proxy_url: str | None) -> None:
             if response.status_code == 429:
                 retry_after = int(response.headers.get("Retry-After", 60))
                 log_status(f"Rate limited (429). Waiting {retry_after}s...", "warning")
-                # Removed: send_rate_limit_warning - only log to console
+                set_global_backoff(retry_after)  # Pause all threads
                 time.sleep(retry_after)
                 continue
 
@@ -529,13 +592,18 @@ def execute_task(task: Task, proxy_url: str | None) -> None:
                     )
 
                     # Try to book using helper
-                    if try_book_slots(valid_slots, entry["date"], task, session, select_proxy, timeout):
+                    if try_book_slots(valid_slots, entry["date"], task, session, timeout):
                         session.close()
                         return
 
-            # Wait before next scan
+            # Wait before next scan with stagger offset
+            wait_for_global_backoff()  # Check if rate limited globally
             delay = get_current_delay(task, in_burst)
-            log_status(f"Scan complete. Waiting {delay / 1000:.1f}s...", "info")
+            stagger = thread_index * settings.stagger_idle_ms
+            total_delay = delay + stagger
+            log_status(f"Scan complete. Waiting {total_delay / 1000:.1f}s...", "info")
+            time.sleep(total_delay / 1000)
+            continue
 
         except requests.exceptions.Timeout:
             consecutive_failures += 1
@@ -581,17 +649,17 @@ def execute_task(task: Task, proxy_url: str | None) -> None:
                 current_backoff = min(current_backoff * 2, task.max_backoff)
             continue
 
-        delay = get_current_delay(task, in_burst)
-        time.sleep(delay / 1000)
-
 
 def run_tasks(tasks: list[Task], proxy_url: str | None) -> None:
-    """Run multiple tasks concurrently."""
-    log_status(f"Starting {len(tasks)} task(s) concurrently...", "info")
+    """Run multiple tasks concurrently with staggered timing."""
+    log_status(f"Starting {len(tasks)} task(s) concurrently with staggered timing...", "info")
     print("=" * 60)
 
     with ThreadPoolExecutor(max_workers=len(tasks)) as executor:
-        futures = [executor.submit(execute_task, task, proxy_url) for task in tasks]
+        futures = [
+            executor.submit(execute_task, task, proxy_url, idx)
+            for idx, task in enumerate(tasks)
+        ]
         for future in as_completed(futures):
             try:
                 future.result()

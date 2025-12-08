@@ -20,39 +20,6 @@ def log_check(name: str, passed: bool, message: str = "") -> None:
         print(f"      {message}")
 
 
-def verify_server() -> dict[str, object]:
-    """Check if the local server is running."""
-    try:
-        resp = requests.get(f"{settings.server_url}/", timeout=5)
-        if resp.status_code == 200:
-            return {
-                "name": "Server",
-                "passed": True,
-                "message": "Running",
-                "details": {"URL": settings.server_url},
-            }
-        return {
-            "name": "Server",
-            "passed": False,
-            "message": f"HTTP {resp.status_code}",
-            "details": {},
-        }
-    except requests.exceptions.ConnectionError:
-        return {
-            "name": "Server",
-            "passed": False,
-            "message": "Not responding",
-            "details": {},
-        }
-    except Exception as e:
-        return {
-            "name": "Server",
-            "passed": False,
-            "message": str(e)[:100],
-            "details": {},
-        }
-
-
 def verify_proxy() -> tuple[dict[str, object], dict[str, str] | None]:
     """Test proxy connectivity."""
     if not settings.proxy_url:
@@ -243,20 +210,8 @@ def main() -> int:
     checks: list[dict[str, object]] = []
     all_passed = True
 
-    # Check 1: Server
-    print("[1/4] Checking server...")
-    server_result = verify_server()
-    checks.append(server_result)
-    log_check(
-        server_result["name"],
-        server_result["passed"],
-        server_result.get("message", ""),
-    )
-    if not server_result["passed"]:
-        all_passed = False
-
-    # Check 2: Proxy
-    print("[2/4] Checking proxy...")
+    # Check 1: Proxy
+    print("[1/3] Checking proxy...")
     proxy_result, proxy = verify_proxy()
     checks.append(proxy_result)
     log_check(
@@ -268,16 +223,16 @@ def main() -> int:
     if not proxy_result["passed"] and settings.proxy_url:
         print("      (Proxy failure is non-critical, continuing...)")
 
-    # Check 3: Auth Token
-    print("[3/4] Checking auth token...")
+    # Check 2: Auth Token
+    print("[2/3] Checking auth token...")
     auth_result = verify_auth_token(proxy)
     checks.append(auth_result)
     log_check(auth_result["name"], auth_result["passed"], auth_result.get("message", ""))
     if not auth_result["passed"]:
         all_passed = False
 
-    # Check 4: Restaurant
-    print("[4/4] Checking restaurant access...")
+    # Check 3: Restaurant
+    print("[3/3] Checking restaurant access...")
     if auth_result["passed"]:
         restaurant_result = verify_restaurant(proxy)
         checks.append(restaurant_result)

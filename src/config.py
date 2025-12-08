@@ -34,9 +34,9 @@ class Settings(BaseSettings):
     burst_timeout: float = 5.0  # Fast timeout during burst
     idle_timeout: float = 15.0  # Normal timeout outside burst
 
-    # Server configuration
-    server_url: str = "http://127.0.0.1:8000"
-    server_port: int = 8000
+    # Stagger configuration - offsets per thread to prevent simultaneous API calls
+    stagger_burst_ms: int = 30  # Light stagger during burst (keep fast)
+    stagger_idle_ms: int = 500  # Heavier stagger during idle (spread load)
 
     # Retry configuration
     max_retries: int = 5

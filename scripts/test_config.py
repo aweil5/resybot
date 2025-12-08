@@ -95,7 +95,6 @@ def main() -> int:
         from src.bot.executor import run_tasks, create_session
         from src.bot.headers import get_headers
         from src.bot.notifier import send_booking_success
-        from src.server.main import app
         print(f"  [OK] All modules imported successfully")
     except Exception as e:
         print(f"  [FAIL] Import error: {e}")
@@ -107,9 +106,8 @@ def main() -> int:
     print("=" * 60)
     print()
     print("Next steps:")
-    print("  1. Start server:  uv run uvicorn src.server.main:app --port 8000")
-    print("  2. Run verify:    uv run python scripts/verify.py")
-    print("  3. Run bot:       uv run python scripts/run.py")
+    print("  1. Run verify:    uv run python scripts/verify.py")
+    print("  2. Run bot:       uv run python scripts/run.py")
     print()
 
     return 0

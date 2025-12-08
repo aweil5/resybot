@@ -25,26 +25,6 @@ class Task(BaseModel):
     max_backoff: int = 30
 
 
-class DetailsRequest(BaseModel):
-    """Request model for getting reservation details."""
-
-    day: str
-    party_size: int
-    config_token: str
-    restaurant_id: str
-    headers: dict[str, str]
-    select_proxy: dict[str, str] | None = None
-
-
-class ReservationRequest(BaseModel):
-    """Request model for booking a reservation."""
-
-    book_token: str
-    payment_id: int
-    headers: dict[str, str]
-    select_proxy: dict[str, str] | None = None
-
-
 class VerificationResult(BaseModel):
     """Result of a verification check."""
 
